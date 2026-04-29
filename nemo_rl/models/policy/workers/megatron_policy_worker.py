@@ -635,6 +635,9 @@ class MegatronPolicyWorker(AbstractPolicyWorker, ColocatablePolicyInterface):
         model_cfg.context_parallel_size = self.cfg["megatron_cfg"][
             "context_parallel_size"
         ]
+        if "attention_backend" in self.cfg["megatron_cfg"]:
+            from megatron.core.transformer.enums import AttnBackend
+            model_cfg.attention_backend = AttnBackend[self.cfg["megatron_cfg"]["attention_backend"]]
         if model_cfg.context_parallel_size > 1:
             assert self.cfg["sequence_packing"]["enabled"], (
                 "Sequence Packing must be enabled to use Context Parallelism with MCore"

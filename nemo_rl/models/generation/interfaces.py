@@ -209,6 +209,7 @@ class GenerationOutputSpec(TypedDict):
         torch.Tensor
     )  # Length of full valid sequence (input + generated response)
     logprobs: torch.Tensor
+    spec_token_origins: NotRequired[torch.Tensor]  # Per-token speculative decoding origin: 0=target, N=draft iter N
     __extra__: Any
 
 
