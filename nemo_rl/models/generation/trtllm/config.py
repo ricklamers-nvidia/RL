@@ -12,13 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Constants for generation backend names.
+from typing import TypedDict
 
-These should be used instead of raw string literals when checking or
-comparing backend names in config values.
-"""
+from nemo_rl.models.generation.interfaces import GenerationConfig
 
-VLLM_BACKEND = "vllm"
-SGLANG_BACKEND = "sglang"
-MEGATRON_BACKEND = "megatron"
-TRTLLM_BACKEND = "trtllm"
+
+class TrtllmSpecificArgs(TypedDict):
+    """Configuration for a persistent external TRT-LLM target."""
+
+    rollout_base_url: str
+    admin_base_url: str
+    tensor_parallel_size: int
+    max_model_len: int
+    request_timeout_s: float
+    admin_timeout_s: float
+    refit_timeout_s: float
+    auth_token_env: str
+    protocol_version: str
+    initial_policy_version: int
+    health_check_on_init: bool
+
+
+class TrtllmConfig(GenerationConfig):
+    trtllm_cfg: TrtllmSpecificArgs

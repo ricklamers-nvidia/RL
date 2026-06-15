@@ -41,6 +41,8 @@ from nemo_rl.experience.interfaces import Completion, PromptGroupRecord
 from nemo_rl.experience.rollout_manager import RolloutManager
 from nemo_rl.experience.rollouts import (
     _calculate_single_metric,
+    _derive_specdec_ratios,
+    _extract_specdec_generation_metrics,
     run_async_multi_turn_rollout,
     run_async_nemo_gym_rollout,
     run_multi_turn_rollout,
@@ -101,6 +103,33 @@ class TestCalculateSingleMetric:
         result = _calculate_single_metric([5.0, 5.0], batch_size=2, key_name="test")
 
         assert result["test/stddev"] == 0.0
+
+
+class TestSpeculativeDecodingMetrics:
+    def test_aggregate_counters_do_not_require_per_round_histogram(self):
+        generation_output = BatchedDataDict(
+            {
+                "specdec_accepted_draft_tokens": torch.tensor([9, 1]),
+                "specdec_draft_tokens": torch.tensor([10, 10]),
+                "specdec_verification_rounds": torch.tensor([3, 2]),
+                "policy_version": torch.tensor([4, 4]),
+                "policy_update_step": torch.tensor([4, 4]),
+                "specdec_draft_enabled": torch.tensor([True, True]),
+            }
+        )
+
+        metrics = _extract_specdec_generation_metrics(generation_output)
+        _derive_specdec_ratios(metrics)
+
+        assert metrics["specdec/accepted_draft_tokens_total"] == 10
+        assert metrics["specdec/draft_tokens_total"] == 20
+        assert metrics["specdec/verification_rounds_total"] == 5
+        assert metrics["specdec/token_acceptance_rate"] == pytest.approx(0.5)
+        assert metrics["specdec/acceptance_length_average"] == pytest.approx(2.0)
+        assert metrics["specdec/policy_version"] == 4
+        assert metrics["specdec/policy_update_step"] == 4
+        assert metrics["specdec/draft_enabled"] is True
+        assert "histogram/specdec_accepted_draft_tokens_per_round" not in metrics
 
 
 @pytest.fixture(scope="function")

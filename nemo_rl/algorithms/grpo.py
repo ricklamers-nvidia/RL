@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import gc
+import json
 import os
 import time
 import warnings
@@ -80,8 +81,13 @@ from nemo_rl.experience.rollouts import (
     run_async_nemo_gym_rollout,
     run_multi_turn_rollout,
 )
+from nemo_rl.models.generation.constants import TRTLLM_BACKEND
 from nemo_rl.models.generation.interfaces import GenerationInterface
 from nemo_rl.models.generation.sglang import SGLangConfig, SGLangGeneration
+from nemo_rl.models.generation.trtllm import (
+    TrtllmConfig,
+    TrtllmExternalGeneration,
+)
 from nemo_rl.models.generation.vllm import VllmConfig, VllmGeneration
 from nemo_rl.models.policy import PolicyConfig
 from nemo_rl.models.policy.interfaces import ColocatablePolicyInterface
@@ -249,7 +255,7 @@ def setup(
     ColocatablePolicyInterface,
     Optional[GenerationInterface],
     Optional[EnvironmentInterface],
-    tuple[RayVirtualCluster, RayVirtualCluster],
+    tuple[RayVirtualCluster, Optional[RayVirtualCluster]],
     StatefulDataLoader | MultipleDataloaderWrapper,
     Optional[StatefulDataLoader],
     ClippedPGLossFn,
@@ -287,6 +293,8 @@ def setup(
     assert generation_config is not None, (
         "A generation config in the PolicyConfig is required for GRPO"
     )
+    backend = generation_config["backend"]
+    external_trtllm = backend == TRTLLM_BACKEND
 
     # Set seed for all random number generators
     set_seed(grpo_config["seed"])
@@ -470,7 +478,32 @@ def setup(
             f"policy_nodes:{policy_nodes} + rm_nodes:{rm_nodes} = total_nodes:{total_nodes}"
         )
 
-    if colocated_inference:
+    if external_trtllm:
+        assert not colocated_inference, (
+            "The persistent TRT-LLM backend is external and cannot be colocated "
+            "with policy training."
+        )
+        train_gpus_per_node = cluster_config["gpus_per_node"]
+        train_nodes = policy_nodes
+        train_cluster = RayVirtualCluster(
+            name="grpo_train_cluster",
+            bundle_ct_per_node_list=[train_gpus_per_node] * train_nodes,
+            use_gpus=True,
+            num_gpus_per_node=train_gpus_per_node,
+            max_colocated_worker_groups=1,
+            port_range_low=cluster_config.get("master_port_range_low"),
+            port_range_high=cluster_config.get("master_port_range_high"),
+        )
+        inference_cluster = None
+        inference_nodes = 0
+        inference_gpus_per_node = 0
+        print(
+            f"  ✓ Ray train cluster initialized with {train_nodes} nodes with "
+            f"{train_gpus_per_node} GPUs per node; TRT-LLM is externally managed",
+            flush=True,
+        )
+
+    elif colocated_inference:
         if total_nodes == 1:
             policy_gpus_per_node = cluster_config["gpus_per_node"] - rm_gpus_per_node
             assert policy_gpus_per_node > 0, (
@@ -597,7 +630,6 @@ def setup(
     print("\n▶ Setting up model and training...", flush=True)
 
     # vllm model loading prefers clean environment, initialize policy_generation before policy in colocated mode
-    backend = generation_config["backend"]
     generation_config["model_name"] = policy_config["model_name"]  # Needed for vLLM
 
     # Dictionary to store worker initialization timing stats for logging
@@ -658,6 +690,13 @@ def setup(
         """Initialize SGLang generation workers."""
         t0 = time.perf_counter()
         pg = SGLangGeneration(cluster=inference_cluster, config=generation_config)
+        pg.finish_generation()
+        return pg, time.perf_counter() - t0
+
+    def init_trtllm():
+        """Connect to the persistent TRT-LLM generation target."""
+        t0 = time.perf_counter()
+        pg = TrtllmExternalGeneration(config=generation_config)
         pg.finish_generation()
         return pg, time.perf_counter() - t0
 
@@ -908,6 +947,24 @@ def setup(
             flush=True,
         )
 
+    elif backend == TRTLLM_BACKEND:
+        generation_config = cast(TrtllmConfig, generation_config)
+        policy_generation, policy = initialize_generation_with_policy(
+            init_generation_fn=init_trtllm,
+            generation_name="TRT-LLM",
+            init_time_key="trtllm_init_time_s",
+            colocated_inference=False,
+            worker_init_timing_metrics=worker_init_timing_metrics,
+        )
+        print(
+            f"  ✓ Using persistent TRT-LLM backend for generation with "
+            f"{policy_config['model_name']}",
+            flush=True,
+        )
+
+    else:
+        raise ValueError(f"Unsupported generation backend: {backend!r}")
+
     # Record when worker initialization completes (for calculating other setup time)
     worker_init_complete_time = time.perf_counter() - setup_start_time
 
@@ -921,7 +978,12 @@ def setup(
         print(f"Using ip: {ip}, port: {port} for collective communication", flush=True)
         # world includes all training workers and all inference workers
         train_world_size = train_cluster.world_size()
-        inference_world_size = inference_nodes * inference_gpus_per_node
+        if external_trtllm:
+            inference_world_size = generation_config["trtllm_cfg"][
+                "tensor_parallel_size"
+            ]
+        else:
+            inference_world_size = inference_nodes * inference_gpus_per_node
         world_size = train_world_size + inference_world_size
         # init collective
         futures_train = policy.init_collective(
@@ -948,11 +1010,17 @@ def setup(
         print("\n▶ Worker Initialization Timing:")
 
         vllm_time = worker_init_timing_metrics.get("vllm_init_time_s", 0)
+        sglang_time = worker_init_timing_metrics.get("sglang_init_time_s", 0)
+        trtllm_time = worker_init_timing_metrics.get("trtllm_init_time_s", 0)
         policy_time = worker_init_timing_metrics.get("policy_init_time_s", 0)
         total_setup = worker_init_timing_metrics.get("total_setup_time_s", 0)
 
         if vllm_time:
             print(f"  vLLM init: {vllm_time:.1f}s")
+        if sglang_time:
+            print(f"  SGLang init: {sglang_time:.1f}s")
+        if trtllm_time:
+            print(f"  TRT-LLM connection: {trtllm_time:.1f}s")
 
         if policy_time:
             print(f"  Policy init: {policy_time:.1f}s")
@@ -1997,6 +2065,11 @@ def grpo_train(
                         rollout_metrics["mean_gen_tokens_per_sample"]
                     )
                     logger.log_metrics(rollout_metrics, total_steps + 1, prefix="train")
+                    _log_specdec_policy_step_metrics(
+                        logger,
+                        rollout_metrics,
+                        training_step=total_steps + 1,
+                    )
 
                 repeated_batch = scale_rewards(
                     repeated_batch, master_config.grpo["reward_scaling"]
@@ -2354,6 +2427,12 @@ def grpo_train(
                     )
                     logger.log_metrics(
                         val_metrics, total_steps + 1, prefix="validation"
+                    )
+                    _log_specdec_policy_step_metrics(
+                        logger,
+                        val_metrics,
+                        training_step=total_steps + 1,
+                        phase="validation",
                     )
 
                 # Get flat advantages and token mask for masked metrics computation
@@ -2771,6 +2850,7 @@ def validate(
                     max_rollout_turns=master_config.grpo["max_rollout_turns"],
                     greedy=False,
                 )
+            additional_metrics_to_report = gen_metrics
 
             total_rewards.extend(val_batch["total_reward"].tolist())
             total_lengths.append(gen_metrics["mean_gen_tokens_per_sample"])
@@ -2859,7 +2939,9 @@ def aggregate_rollout_metrics(
     Different metric types are aggregated according to their semantics:
     - Metrics ending with "/min" or starting with "min_" (excluding "_rate" suffix): take the minimum
     - Metrics ending with "/max" or starting with "max_" (excluding "_rate" suffix): take the maximum
-    - "total_turns": summed
+    - "total_turns" and metrics ending with "_total": summed
+    - Histogram values: flattened
+    - Policy version/update-step and draft-enabled values: required to match
     - Non-numeric values: passed through as-is
     - All other numeric metrics: averaged
 
@@ -2871,17 +2953,95 @@ def aggregate_rollout_metrics(
     """
     aggregated = {}
     for k, v in per_group_metrics.items():
-        if not isinstance(v[0], (int, float)):
+        if k.startswith("histogram/"):
+            aggregated[k] = [item for group_values in v for item in group_values]
+        elif k in {
+            "specdec/policy_version",
+            "specdec/policy_update_step",
+            "specdec/draft_enabled",
+        }:
+            unique_values = set(v)
+            if len(unique_values) != 1:
+                raise ValueError(
+                    f"Cannot aggregate rollout groups across {k} values: "
+                    f"{sorted(unique_values)}"
+                )
+            aggregated[k] = v[0]
+        elif not isinstance(v[0], (int, float)):
             aggregated[k] = v
         elif k.endswith("/min") or (k.startswith("min_") and not k.endswith("_rate")):
             aggregated[k] = min(v)
         elif k.endswith("/max") or (k.startswith("max_") and not k.endswith("_rate")):
             aggregated[k] = max(v)
-        elif k == "total_turns":
+        elif k == "total_turns" or k.endswith("_total"):
             aggregated[k] = sum(v)
         else:
             aggregated[k] = sum(v) / len(v)
+
+    accepted = aggregated.get("specdec/accepted_draft_tokens_total")
+    drafted = aggregated.get("specdec/draft_tokens_total")
+    rounds = aggregated.get("specdec/verification_rounds_total")
+    if accepted is not None and drafted is not None and rounds is not None:
+        aggregated["specdec/token_acceptance_rate"] = (
+            accepted / drafted if drafted > 0 else 0.0
+        )
+        aggregated["specdec/acceptance_length_average"] = (
+            accepted / rounds if rounds > 0 else 0.0
+        )
     return aggregated
+
+
+def _log_specdec_policy_step_metrics(
+    logger: Logger,
+    rollout_metrics: dict[str, Any],
+    *,
+    training_step: int,
+    phase: str = "train",
+) -> None:
+    """Append exact speculative-decoding aggregates for one policy step."""
+    required_metrics = (
+        "specdec/accepted_draft_tokens_total",
+        "specdec/draft_tokens_total",
+        "specdec/verification_rounds_total",
+        "specdec/token_acceptance_rate",
+        "specdec/acceptance_length_average",
+        "specdec/policy_version",
+        "specdec/policy_update_step",
+    )
+    if not all(metric in rollout_metrics for metric in required_metrics):
+        return
+
+    record = {
+        "schema_version": "nemo-rl-specdec-policy-step-v1",
+        "phase": phase,
+        "training_step": training_step,
+        "policy_version": int(rollout_metrics["specdec/policy_version"]),
+        "policy_update_step": int(
+            rollout_metrics["specdec/policy_update_step"]
+        ),
+        "accepted_draft_tokens_total": int(
+            rollout_metrics["specdec/accepted_draft_tokens_total"]
+        ),
+        "draft_tokens_total": int(
+            rollout_metrics["specdec/draft_tokens_total"]
+        ),
+        "verification_rounds_total": int(
+            rollout_metrics["specdec/verification_rounds_total"]
+        ),
+        "token_acceptance_rate": float(
+            rollout_metrics["specdec/token_acceptance_rate"]
+        ),
+        "acceptance_length_average": float(
+            rollout_metrics["specdec/acceptance_length_average"]
+        ),
+        "draft_enabled": bool(
+            rollout_metrics.get("specdec/draft_enabled", True)
+        ),
+    }
+    logger.log_string_list_as_jsonl(
+        [json.dumps(record, sort_keys=True)],
+        "specdec_policy_updates.jsonl",
+    )
 
 
 def async_grpo_train(

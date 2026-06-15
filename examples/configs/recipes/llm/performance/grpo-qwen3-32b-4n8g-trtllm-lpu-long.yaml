@@ -1,0 +1,56 @@
+defaults: ./grpo-qwen3-32b-4n8g.yaml
+
+grpo:
+  num_prompts_per_step: 4
+  num_generations_per_prompt: 4
+  max_num_steps: 5
+  val_period: 0
+  val_at_start: false
+  val_at_end: true
+  max_val_samples: 16
+  val_batch_size: 16
+
+checkpointing:
+  enabled: false
+  checkpoint_dir: /nfs/experiments/qwen3-32b-grpo-trtllm-lpu-r1/checkpoints
+
+policy:
+  model_name: /nfs/huggingface/Qwen/Qwen3-32B/snapshots/9216db5781bf21249d130ec9da846c4624c16137
+  tokenizer:
+    name: ${policy.model_name}
+  train_global_batch_size: 16
+  max_total_sequence_length: 8192
+  generation:
+    backend: trtllm
+    max_new_tokens: 6144
+    temperature: 1.0
+    top_p: 1.0
+    top_k: null
+    stop_token_ids: null
+    stop_strings: null
+    vllm_cfg: null
+    trtllm_cfg:
+      rollout_base_url: ${oc.env:TRTLLM_ROLLOUT_BASE_URL,http://qwen3-32b-trtllm-rollout:8080}
+      admin_base_url: ${oc.env:TRTLLM_ADMIN_BASE_URL,http://qwen3-32b-trtllm-admin:8081}
+      tensor_parallel_size: 1
+      max_model_len: ${policy.max_total_sequence_length}
+      request_timeout_s: 3600
+      admin_timeout_s: 120
+      refit_timeout_s: 3600
+      auth_token_env: TRTLLM_RL_AUTH_TOKEN
+      protocol_version: nemo-rl-trtllm-v1
+      initial_policy_version: -1
+      health_check_on_init: true
+    colocated:
+      enabled: false
+      resources:
+        gpus_per_node: null
+        num_nodes: null
+
+logger:
+  log_dir: /nfs/experiments/qwen3-32b-grpo-trtllm-lpu-r1/logs
+  wandb_enabled: false
+  tensorboard_enabled: true
+  wandb:
+    project: nemo-rl
+    name: grpo-qwen3-32b-4n8g-trtllm-lpu-long

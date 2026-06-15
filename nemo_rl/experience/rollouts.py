@@ -167,7 +167,7 @@ def generate_responses(
     input_lengths: torch.Tensor,
     include_logprobs: bool = True,
     greedy: bool = False,
-) -> tuple[BatchedDataDict[DatumSpec], list[torch.Tensor], dict[str, float | int]]:
+) -> tuple[BatchedDataDict[DatumSpec], list[torch.Tensor], dict[str, Any]]:
     """Generate responses from policy using synchronous generation."""
     # Add stop_strings to generation_input_data if present in the batch
     if "stop_strings" in batch:
@@ -221,13 +221,119 @@ def generate_responses(
     gen_metrics = {
         "mean_generation_length": generation_lengths.float().mean().item(),
         "total_generated_tokens": generation_lengths.sum().item(),
+        "generation/generated_tokens_total": int(generation_lengths.sum().item()),
     }
+    gen_metrics.update(_extract_specdec_generation_metrics(generation_outputs))
 
     # Add response_truncated to gen_metrics for use by caller
     if response_truncated is not None:
         gen_metrics["_response_truncated"] = response_truncated
+        gen_metrics["generation/length_truncations_total"] = int(
+            response_truncated.sum().item()
+        )
 
     return batch, generated_ids, gen_metrics
+
+
+def _extract_specdec_generation_metrics(
+    generation_outputs: BatchedDataDict[GenerationOutputSpec],
+) -> dict[str, Any]:
+    counter_fields = {
+        "specdec_accepted_draft_tokens": "specdec/accepted_draft_tokens_total",
+        "specdec_draft_tokens": "specdec/draft_tokens_total",
+        "specdec_verification_rounds": "specdec/verification_rounds_total",
+    }
+    present_counter_fields = [
+        output_key for output_key in counter_fields if output_key in generation_outputs
+    ]
+    if not present_counter_fields:
+        return {}
+    if len(present_counter_fields) != len(counter_fields):
+        missing = sorted(set(counter_fields) - set(present_counter_fields))
+        raise ValueError(
+            f"Speculative-decoding generation output is missing counters: {missing}"
+        )
+
+    metrics: dict[str, Any] = {
+        metric_key: int(generation_outputs[output_key].sum().item())
+        for output_key, metric_key in counter_fields.items()
+    }
+
+    per_round = generation_outputs.get("specdec_accepted_draft_tokens_per_round")
+    if per_round is not None:
+        metrics["histogram/specdec_accepted_draft_tokens_per_round"] = [
+            accepted for request_values in per_round for accepted in request_values
+        ]
+
+    for output_key, metric_key in (
+        ("policy_version", "specdec/policy_version"),
+        ("policy_update_step", "specdec/policy_update_step"),
+    ):
+        values = generation_outputs.get(output_key)
+        if values is None:
+            raise ValueError(f"Speculative-decoding output must include {output_key}")
+        unique_values = torch.unique(values)
+        if unique_values.numel() != 1:
+            raise ValueError(
+                f"Speculative-decoding batch contains multiple {output_key} values: "
+                f"{unique_values.tolist()}"
+            )
+        metrics[metric_key] = int(unique_values.item())
+
+    draft_enabled = generation_outputs.get("specdec_draft_enabled")
+    if draft_enabled is not None:
+        unique_values = torch.unique(draft_enabled)
+        if unique_values.numel() != 1:
+            raise ValueError(
+                "Speculative-decoding batch contains both enabled and disabled "
+                "draft requests"
+            )
+        metrics["specdec/draft_enabled"] = bool(unique_values.item())
+
+    return metrics
+
+
+def _accumulate_generation_metrics(
+    accumulated: dict[str, Any],
+    generation_metrics: dict[str, Any],
+) -> None:
+    for key, value in generation_metrics.items():
+        if key.startswith("_") or key in {
+            "mean_generation_length",
+            "total_generated_tokens",
+        }:
+            continue
+        if key.endswith("_total"):
+            accumulated[key] = accumulated.get(key, 0) + value
+        elif key.startswith("histogram/"):
+            accumulated.setdefault(key, []).extend(value)
+        elif key in {
+            "specdec/policy_version",
+            "specdec/policy_update_step",
+            "specdec/draft_enabled",
+        }:
+            previous = accumulated.get(key)
+            if previous is not None and previous != value:
+                raise ValueError(
+                    f"Rollout crossed {key} boundary: {previous} != {value}"
+                )
+            accumulated[key] = value
+        else:
+            accumulated[key] = value
+
+
+def _derive_specdec_ratios(metrics: dict[str, Any]) -> None:
+    accepted = metrics.get("specdec/accepted_draft_tokens_total")
+    drafted = metrics.get("specdec/draft_tokens_total")
+    rounds = metrics.get("specdec/verification_rounds_total")
+    if accepted is None or drafted is None or rounds is None:
+        return
+    metrics["specdec/token_acceptance_rate"] = (
+        accepted / drafted if drafted > 0 else 0.0
+    )
+    metrics["specdec/acceptance_length_average"] = (
+        accepted / rounds if rounds > 0 else 0.0
+    )
 
 
 async def generate_responses_async(
@@ -504,6 +610,7 @@ def run_multi_turn_rollout(
     # Tracking per-turn metrics
     total_gen_tokens_per_turn = []
     active_samples_per_turn = []
+    accumulated_generation_metrics: dict[str, Any] = {}
 
     for turn in range(max_rollout_turns):
         if len(active_indices) == 0:
@@ -557,6 +664,7 @@ def run_multi_turn_rollout(
             input_lengths=active_input_lengths,
             greedy=greedy,
         )
+        _accumulate_generation_metrics(accumulated_generation_metrics, gen_metrics)
 
         # Record response truncation (response hit max_tokens without stop token)
         response_truncated = gen_metrics.pop("_response_truncated", None)
@@ -700,6 +808,8 @@ def run_multi_turn_rollout(
             sample_env_token_counts.float().mean().item()
         ),
     }
+    _derive_specdec_ratios(accumulated_generation_metrics)
+    rollout_metrics.update(accumulated_generation_metrics)
     return current_batch, rollout_metrics
 
 

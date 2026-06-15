@@ -12,13 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Constants for generation backend names.
+from nemo_rl.models.generation.trtllm.config import TrtllmConfig
+from nemo_rl.models.generation.trtllm.trtllm_generation import (
+    TrtllmExternalGeneration,
+)
 
-These should be used instead of raw string literals when checking or
-comparing backend names in config values.
-"""
-
-VLLM_BACKEND = "vllm"
-SGLANG_BACKEND = "sglang"
-MEGATRON_BACKEND = "megatron"
-TRTLLM_BACKEND = "trtllm"
+__all__ = [
+    "TrtllmConfig",
+    "TrtllmExternalGeneration",
+]

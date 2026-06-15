@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
@@ -30,6 +31,7 @@ from nemo_rl.algorithms.grpo import (
     _apply_configured_message_level_advantage_penalties,
     _apply_message_level_advantage_penalties,
     _default_grpo_save_state,
+    _log_specdec_policy_step_metrics,
     _resolve_message_level_advantage_penalties,
     aggregate_rollout_metrics,
     async_grpo_train,
@@ -645,8 +647,9 @@ class StubReplayBuffer:
         """Return a mock that reports whether the current step can train."""
         mock = MagicMock()
         mock.remote = MagicMock(
-            side_effect=lambda _target_step, num_prompts_per_step, *_args: self._size
-            >= num_prompts_per_step
+            side_effect=lambda _target_step, num_prompts_per_step, *_args: (
+                self._size >= num_prompts_per_step
+            )
         )
         return mock
 
@@ -3369,6 +3372,110 @@ class TestAggregateRolloutMetrics:
         metrics = {"total_turns": [10, 20, 30]}
         result = aggregate_rollout_metrics(metrics)
         assert result["total_turns"] == 60
+
+    def test_specdec_ratios_use_summed_numerators_and_denominators(self):
+        metrics = {
+            "specdec/accepted_draft_tokens_total": [9, 1],
+            "specdec/draft_tokens_total": [10, 10],
+            "specdec/verification_rounds_total": [3, 2],
+            "specdec/token_acceptance_rate": [0.9, 0.1],
+            "specdec/acceptance_length_average": [3.0, 0.5],
+            "specdec/policy_version": [4, 4],
+            "specdec/policy_update_step": [4, 4],
+            "histogram/specdec_accepted_draft_tokens_per_round": [
+                [3, 3, 3],
+                [1, 0],
+            ],
+        }
+
+        result = aggregate_rollout_metrics(metrics)
+
+        assert result["specdec/accepted_draft_tokens_total"] == 10
+        assert result["specdec/draft_tokens_total"] == 20
+        assert result["specdec/verification_rounds_total"] == 5
+        assert result["specdec/token_acceptance_rate"] == pytest.approx(0.5)
+        assert result["specdec/acceptance_length_average"] == pytest.approx(2.0)
+        assert result["specdec/policy_version"] == 4
+        assert result["specdec/policy_update_step"] == 4
+        assert result["histogram/specdec_accepted_draft_tokens_per_round"] == [
+            3,
+            3,
+            3,
+            1,
+            0,
+        ]
+
+    def test_specdec_policy_versions_must_match(self):
+        with pytest.raises(ValueError, match="policy_version"):
+            aggregate_rollout_metrics({"specdec/policy_version": [3, 4]})
+
+    def test_specdec_draft_enabled_must_match(self):
+        with pytest.raises(ValueError, match="draft_enabled"):
+            aggregate_rollout_metrics({"specdec/draft_enabled": [True, False]})
+
+    def test_specdec_policy_step_jsonl_contains_exact_step_aggregates(self):
+        logger = MagicMock()
+        _log_specdec_policy_step_metrics(
+            logger,
+            {
+                "specdec/accepted_draft_tokens_total": 10,
+                "specdec/draft_tokens_total": 20,
+                "specdec/verification_rounds_total": 5,
+                "specdec/token_acceptance_rate": 0.5,
+                "specdec/acceptance_length_average": 2.0,
+                "specdec/policy_version": 4,
+                "specdec/policy_update_step": 4,
+                "specdec/draft_enabled": True,
+            },
+            training_step=5,
+        )
+
+        records, filename = logger.log_string_list_as_jsonl.call_args.args
+        assert filename == "specdec_policy_updates.jsonl"
+        assert json.loads(records[0]) == {
+            "schema_version": "nemo-rl-specdec-policy-step-v1",
+            "phase": "train",
+            "training_step": 5,
+            "policy_version": 4,
+            "policy_update_step": 4,
+            "accepted_draft_tokens_total": 10,
+            "draft_tokens_total": 20,
+            "verification_rounds_total": 5,
+            "token_acceptance_rate": 0.5,
+            "acceptance_length_average": 2.0,
+            "draft_enabled": True,
+        }
+
+    def test_specdec_policy_step_jsonl_labels_validation_probe(self):
+        logger = MagicMock()
+        _log_specdec_policy_step_metrics(
+            logger,
+            {
+                "specdec/accepted_draft_tokens_total": 12,
+                "specdec/draft_tokens_total": 24,
+                "specdec/verification_rounds_total": 4,
+                "specdec/token_acceptance_rate": 0.5,
+                "specdec/acceptance_length_average": 3.0,
+                "specdec/policy_version": 5,
+                "specdec/policy_update_step": 5,
+                "specdec/draft_enabled": True,
+            },
+            training_step=5,
+            phase="validation",
+        )
+
+        records, _filename = logger.log_string_list_as_jsonl.call_args.args
+        assert json.loads(records[0])["phase"] == "validation"
+        assert json.loads(records[0])["policy_version"] == 5
+
+    def test_specdec_policy_step_jsonl_skips_non_speculative_rollouts(self):
+        logger = MagicMock()
+        _log_specdec_policy_step_metrics(
+            logger,
+            {"mean_gen_tokens_per_sample": 128.0},
+            training_step=1,
+        )
+        logger.log_string_list_as_jsonl.assert_not_called()
 
     def test_mean_metrics_averaged(self):
         metrics = {

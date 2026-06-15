@@ -1,0 +1,19 @@
+{
+  "schema_version": "lpu-specdec-source-lock-v1",
+  "component": "nemo-rl-qwen3-32b-trtllm-lpu-grpo",
+  "nemo_rl_base": "911dfc31dc69c55aca75c8ab0f5a8ea90c5fab57",
+  "shuyi_trtllm_reference": {
+    "url": "https://github.com/NVIDIA-NeMo/RL/pull/2420",
+    "head": "1e78d8fe0889cdc635cd774fc92756ab3bc23bbe"
+  },
+  "deployment_reference": {
+    "url": "https://github.com/nvidia-lpu/inference-engine-instances/pull/6694",
+    "head": "17c547323e86a1e4e9caf880d31e414767e1e1a8"
+  },
+  "model": {
+    "repository": "Qwen/Qwen3-32B",
+    "revision": "9216db5781bf21249d130ec9da846c4624c16137",
+    "precision": "bfloat16"
+  },
+  "recipe": "examples/configs/recipes/llm/performance/grpo-qwen3-32b-4n8g-trtllm-lpu-long.yaml"
+}
