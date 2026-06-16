@@ -104,10 +104,15 @@ FROM base AS hermetic
 
 WORKDIR /opt/nemo-rl
 
-# Variables to control the build of TE. If there are issues with parallelization, consider
-# setting these to 1.
-ARG MAX_JOBS
-ARG NVTE_BUILD_THREADS_PER_JOB
+# Bound native extension builds on shared build hosts. Callers can lower these
+# values further without modifying the dependency lock.
+ARG MAX_JOBS=4
+ARG NVTE_BUILD_THREADS_PER_JOB=1
+ARG UV_CONCURRENT_BUILDS=1
+ARG UV_CONCURRENT_INSTALLS=4
+ARG TORCH_CUDA_ARCH_LIST="9.0 10.0"
+ARG NVTE_CUDA_ARCHS="90;100"
+ARG CUDAARCHS="90;100"
 # Only use for custom vllm installs. Learn more at https://github.com/NVIDIA-NeMo/RL/blob/main/docs/guides/use-custom-vllm.md
 ARG BUILD_CUSTOM_VLLM
 ARG BUILD_CUSTOM_VLLM_URL
@@ -125,9 +130,15 @@ ARG UV_VERSION
 
 ENV UV_PROJECT_ENVIRONMENT=/opt/nemo_rl_venv
 ENV UV_LINK_MODE=copy
+ENV UV_CONCURRENT_BUILDS=${UV_CONCURRENT_BUILDS}
+ENV UV_CONCURRENT_INSTALLS=${UV_CONCURRENT_INSTALLS}
+ENV CMAKE_BUILD_PARALLEL_LEVEL=${MAX_JOBS}
+ENV MAKEFLAGS="-j${MAX_JOBS}"
+ENV NVTE_CUDA_ARCHS=${NVTE_CUDA_ARCHS}
+ENV CUDAARCHS=${CUDAARCHS}
 
 # Ensure DeepEP is built for H100 and B200 (also mcore inference unified memory API now invokes a torch API that requires these to be set)
-ENV TORCH_CUDA_ARCH_LIST="9.0 10.0"
+ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
 
 # Ensure HybridEP/DeepEP JIT compilation can find nvcc at runtime
 ENV CUDA_HOME=/usr/local/cuda
