@@ -19,6 +19,8 @@ policy:
   tokenizer:
     name: ${policy.model_name}
   train_global_batch_size: 16
+  # TP=4 has batch-variant logprob error unless this matches the training microbatch.
+  logprob_batch_size: 1
   max_total_sequence_length: 8192
   generation:
     backend: trtllm
