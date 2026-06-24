@@ -400,6 +400,27 @@ def test_minimal_inputs_no_counts_no_flops(capsys):
     assert "Throughputs (per GPU)" in out
 
 
+def test_performance_metrics_accepts_null_vllm_config(capsys):
+    master_config = _base_master_config(colocated=False)
+    master_config.policy["generation"]["vllm_cfg"] = None
+
+    perf = print_performance_metrics(
+        {},
+        {"total_num_tokens": 1600.0},
+        {
+            "policy_and_reference_logprobs": 1.0,
+            "policy_training": 3.0,
+            "total_step_time": 8.0,
+            "exposed_generation": 0.2,
+            "prepare_for_generation/total": 0.5,
+        },
+        master_config,
+    )
+
+    assert "tokens_per_sec" in perf
+    assert "Performance Metrics" in capsys.readouterr().out
+
+
 # ============================================================================
 # Tests for calculate_baseline_and_std_per_prompt function
 # ============================================================================
