@@ -704,7 +704,9 @@ def print_performance_metrics(
     num_nodes = master_config.cluster["num_nodes"]
     gpus_per_node = master_config.cluster["gpus_per_node"]
     total_num_gpus = num_nodes * gpus_per_node
-    colocated_inference = master_config.policy["generation"]["colocated"]["enabled"]
+    generation_config = master_config.policy["generation"]
+    colocated_inference = generation_config["colocated"]["enabled"]
+    external_trtllm = generation_config.get("backend") == "trtllm"
 
     # Idle Time from Training Worker (Async GRPO only)
     grpo_config = getattr(master_config, "grpo", {})
@@ -740,18 +742,21 @@ def print_performance_metrics(
         "num_prompts_per_step", 1
     ) * algo_config.get("num_generations_per_prompt", 1)
 
-    if colocated_inference:
+    if external_trtllm:
+        # Persistent TRT-LLM runs outside the Ray training cluster. Its tensor
+        # parallel size describes the inference GPUs without reducing the GPUs
+        # available to policy training.
+        generation_num_gpus = generation_config["trtllm_cfg"]["tensor_parallel_size"]
+        training_num_gpus = total_num_gpus
+    elif colocated_inference:
         training_num_gpus = total_num_gpus
         generation_num_gpus = total_num_gpus
     else:
         generation_num_nodes = (
-            master_config.policy["generation"]["colocated"]["resources"]["num_nodes"]
-            or 1
+            generation_config["colocated"]["resources"]["num_nodes"] or 1
         )
         generation_num_gpus = (
-            master_config.policy["generation"]["colocated"]["resources"][
-                "gpus_per_node"
-            ]
+            generation_config["colocated"]["resources"]["gpus_per_node"]
             * generation_num_nodes
         )
         training_num_gpus = total_num_gpus - generation_num_gpus

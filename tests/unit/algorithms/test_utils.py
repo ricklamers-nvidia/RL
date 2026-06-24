@@ -402,7 +402,17 @@ def test_minimal_inputs_no_counts_no_flops(capsys):
 
 def test_performance_metrics_accepts_null_vllm_config(capsys):
     master_config = _base_master_config(colocated=False)
-    master_config.policy["generation"]["vllm_cfg"] = None
+    master_config.policy["generation"].update(
+        {
+            "backend": "trtllm",
+            "vllm_cfg": None,
+            "trtllm_cfg": {"tensor_parallel_size": 1},
+            "colocated": {
+                "enabled": False,
+                "resources": {"num_nodes": None, "gpus_per_node": None},
+            },
+        }
+    )
 
     perf = print_performance_metrics(
         {},
@@ -411,13 +421,18 @@ def test_performance_metrics_accepts_null_vllm_config(capsys):
             "policy_and_reference_logprobs": 1.0,
             "policy_training": 3.0,
             "total_step_time": 8.0,
-            "exposed_generation": 0.2,
+            "generation": 4.0,
             "prepare_for_generation/total": 0.5,
         },
         master_config,
     )
 
     assert "tokens_per_sec" in perf
+    assert math.isclose(
+        perf["training_worker_group_tokens_per_sec_per_gpu"],
+        1600.0 / 4.0 / 16.0,
+    )
+    assert math.isclose(perf["generation_tokens_per_sec_per_gpu"], 1600.0 / 4.0)
     assert "Performance Metrics" in capsys.readouterr().out
 
 
