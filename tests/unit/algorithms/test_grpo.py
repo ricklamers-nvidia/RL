@@ -31,6 +31,7 @@ from nemo_rl.algorithms.grpo import (
     _apply_configured_message_level_advantage_penalties,
     _apply_message_level_advantage_penalties,
     _default_grpo_save_state,
+    _get_vllm_cfg,
     _log_specdec_policy_step_metrics,
     _resolve_message_level_advantage_penalties,
     aggregate_rollout_metrics,
@@ -57,6 +58,16 @@ from nemo_rl.utils.timer import Timer
 from tests.unit.algorithms.utils import (
     create_mock_batch,
 )
+
+
+@pytest.mark.parametrize("generation_config", [{}, {"vllm_cfg": None}])
+def test_get_vllm_cfg_normalizes_missing_or_null_config(generation_config):
+    assert _get_vllm_cfg(generation_config) == {}
+
+
+def test_get_vllm_cfg_preserves_populated_config():
+    vllm_cfg = {"async_engine": True}
+    assert _get_vllm_cfg({"vllm_cfg": vllm_cfg}) is vllm_cfg
 
 
 @pytest.fixture

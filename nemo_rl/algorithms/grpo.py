@@ -1420,6 +1420,11 @@ def _apply_configured_message_level_advantage_penalties(
     )
 
 
+def _get_vllm_cfg(generation_config: dict[str, Any]) -> dict[str, Any]:
+    """Return an empty mapping when a non-vLLM backend sets vllm_cfg to null."""
+    return generation_config.get("vllm_cfg") or {}
+
+
 def _should_use_async_rollouts(master_config: MasterConfig) -> bool:
     """Determine if async rollouts should be used based on the configuration.
 
@@ -1433,7 +1438,7 @@ def _should_use_async_rollouts(master_config: MasterConfig) -> bool:
     if backend != "vllm":
         return False
 
-    vllm_cfg = generation_config.get("vllm_cfg", {})
+    vllm_cfg = _get_vllm_cfg(generation_config)
     return vllm_cfg.get("async_engine", False)
 
 
@@ -2653,27 +2658,20 @@ def grpo_train(
                     name="train/token_mult_prob_error_plot_sample",
                 )
             del train_data
+            vllm_cfg = _get_vllm_cfg(master_config.policy["generation"])
             if (
-                master_config.policy["generation"]
-                .get("vllm_cfg", {})
-                .get("enable_vllm_metrics_logger", False)
+                vllm_cfg.get("enable_vllm_metrics_logger", False)
                 and master_config.logger["wandb_enabled"]
             ):
                 log_generation_metrics_to_wandb(
                     generation_logger_metrics,
                     total_steps + 1,
-                    master_config.policy["generation"]["vllm_cfg"][
-                        "vllm_metrics_logger_interval"
-                    ],
+                    vllm_cfg["vllm_metrics_logger_interval"],
                     logger,
                 )
 
             # Plot ISL/OSL/ISL+OSL histograms to wandb
-            if (
-                master_config.policy["generation"]
-                .get("vllm_cfg", {})
-                .get("async_engine", False)
-            ):
+            if vllm_cfg.get("async_engine", False):
                 for metric_name in metrics.keys():
                     if metric_name.startswith("histogram/"):
                         logger.log_histogram(
@@ -3908,27 +3906,20 @@ def async_grpo_train(
             metrics["buffer_size"] = buffer_size_current
             metrics["avg_trajectory_age"] = avg_trajectory_age
 
+            vllm_cfg = _get_vllm_cfg(master_config.policy["generation"])
             if (
-                master_config.policy["generation"]
-                .get("vllm_cfg", {})
-                .get("enable_vllm_metrics_logger", False)
+                vllm_cfg.get("enable_vllm_metrics_logger", False)
                 and master_config.logger["wandb_enabled"]
             ):
                 log_generation_metrics_to_wandb(
                     generation_logger_metrics,
                     step + 1,
-                    master_config.policy["generation"]["vllm_cfg"][
-                        "vllm_metrics_logger_interval"
-                    ],
+                    vllm_cfg["vllm_metrics_logger_interval"],
                     logger,
                 )
 
             # Plot ISL/OSL/ISL+OSL histograms to wandb
-            if (
-                master_config.policy["generation"]
-                .get("vllm_cfg", {})
-                .get("async_engine", False)
-            ):
+            if vllm_cfg.get("async_engine", False):
                 for metric_name in metrics.keys():
                     if metric_name.startswith("histogram/"):
                         logger.log_histogram(
