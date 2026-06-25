@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import time
 from unittest.mock import patch
 
@@ -61,6 +62,23 @@ class TestTimer:
         # Check that the timer recorded the measurement
         assert "test_context" in timer._timers
         assert len(timer._timers["test_context"]) == 1
+
+    def test_optional_timeline_records_absolute_span(self, timer, tmp_path, monkeypatch):
+        monkeypatch.setenv("NRL_TIMELINE_DIR", str(tmp_path))
+        monkeypatch.setenv("RUN_ID", "test-run")
+        timer.set_timeline_context(policy_update_step=2, phase="train")
+
+        with timer.time("policy_training"):
+            pass
+
+        paths = list(tmp_path.glob("timer-*.jsonl"))
+        assert len(paths) == 1
+        record = json.loads(paths[0].read_text())
+        assert record["label"] == "policy_training"
+        assert record["policy_update_step"] == 2
+        assert record["phase"] == "train"
+        assert record["run_id"] == "test-run"
+        assert record["end_time_ns"] >= record["start_time_ns"]
 
     def test_multiple_measurements(self, timer):
         """Test recording multiple measurements for the same label."""

@@ -554,6 +554,12 @@ def grpo_train_sync(
                 maybe_gpu_profile_step(policy_generation, total_steps + 1)
             val_metrics, validation_timings = None, None
 
+            timer.set_timeline_context(
+                phase="train",
+                policy_update_step=total_steps + 1,
+                epoch=current_epoch,
+                dataloader_step=current_step,
+            )
             with timer.time("total_step_time"):
                 print("▶ Preparing batch...", flush=True)
                 with timer.time("data_processing"):

@@ -11,9 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
+import os
+import socket
 import sys
 import time
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Callable, Generator, Optional, Sequence, Union
 
 import numpy as np
@@ -75,12 +79,50 @@ class Timer:
         # This allows calculating reductions like mean, min, max, and std dev
         self._timers: dict[str, list[float]] = {}
         self._start_times: dict[str, float] = {}
+        self._start_wall_times_ns: dict[str, int] = {}
+        self._timeline_context: dict[str, object] = {}
+
+    def set_timeline_context(self, **values: object) -> None:
+        """Attach run/step metadata to optional JSONL timing spans."""
+        self._timeline_context = values
+
+    def _write_timeline_span(
+        self,
+        label: str,
+        *,
+        start_ns: int,
+        end_ns: int,
+        elapsed_s: float,
+    ) -> None:
+        timeline_dir = os.environ.get("NRL_TIMELINE_DIR", "")
+        if not timeline_dir:
+            return
+        record = {
+            "schema_version": 1,
+            "source": "nemo_rl.timer",
+            "label": label,
+            "start_time_ns": start_ns,
+            "end_time_ns": end_ns,
+            "duration_s": elapsed_s,
+            "pid": os.getpid(),
+            "hostname": socket.gethostname(),
+            "run_id": os.environ.get("RUN_ID", ""),
+            **self._timeline_context,
+        }
+        try:
+            path = Path(timeline_dir) / f"timer-{socket.gethostname()}-{os.getpid()}.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(record, sort_keys=True) + "\n")
+        except OSError as exc:
+            print(f"warning: failed to write NeMo-RL timing span: {exc}", file=sys.stderr)
 
     def start(self, label: str) -> None:
         """Start timing for the given label."""
         if label in self._start_times:
             raise ValueError(f"Timer '{label}' is already running")
         self._start_times[label] = time.perf_counter()
+        self._start_wall_times_ns[label] = time.time_ns()
 
     def stop(self, label: str) -> float:
         """Stop timing for the given label and return the elapsed time.
@@ -100,10 +142,18 @@ class Timer:
             )
 
         elapsed = time.perf_counter() - self._start_times[label]
+        end_wall_time_ns = time.time_ns()
         if label not in self._timers:
             self._timers[label] = []
         self._timers[label].append(elapsed)
         del self._start_times[label]
+        start_wall_time_ns = self._start_wall_times_ns.pop(label)
+        self._write_timeline_span(
+            label,
+            start_ns=start_wall_time_ns,
+            end_ns=end_wall_time_ns,
+            elapsed_s=elapsed,
+        )
         return elapsed
 
     @contextmanager
@@ -243,9 +293,11 @@ class Timer:
                 del self._timers[label]
             if label in self._start_times:
                 del self._start_times[label]
+            self._start_wall_times_ns.pop(label, None)
         else:
             self._timers = {}
             self._start_times = {}
+            self._start_wall_times_ns = {}
 
 
 def convert_to_seconds(time_string: str) -> int:
